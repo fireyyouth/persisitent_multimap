@@ -47,16 +47,15 @@ struct PersistentMultiMap {
     std::map<std::pair<uint64_t, uint64_t>, std::pair<void *, size_t>> mapping_;
     std::map<void *, decltype(mapping_)::iterator> reverse_mapping_;
 
-
-    uint64_t GetMaxVersion(uint64_t id) {
+    decltype(mapping_)::const_iterator GetMaxVersion(uint64_t id) const {
         auto end = mapping_.upper_bound(std::make_pair(id, 0UL - 1UL));
         if (end == mapping_.begin()) {
-            return 0;
+            return mapping_.end();
         }
         if (std::prev(end, 1)->first.first != id) {
-            return 0;
+            return mapping_.end();
         }
-        return std::prev(end, 1)->first.second;
+        return std::prev(end, 1);
     }
 
 
@@ -129,11 +128,13 @@ struct PersistentMultiMap {
 
         uint64_t version = 0;
         {
-            version = GetMaxVersion(id);
-            if (version + 1 == 0) {
-                throw 0;
+            auto iter = GetMaxVersion(id);
+            if (iter != mapping_.end()) {
+                if (iter->first.second + 1 == 0) {
+                    throw 0;
+                }
+                version = iter->first.second + 1;
             }
-            version += 1;
         }
 
         void *ret = nullptr;
@@ -169,6 +170,15 @@ struct PersistentMultiMap {
         return ret;
     }
 
+    std::pair<void *, size_t> GetNewest(uint64_t id) const {
+        auto iter = GetMaxVersion(id);
+        if (iter == mapping_.end()) {
+            return std::pair<void *, size_t>(nullptr, 0);
+        } else {
+            return iter->second;
+        }
+    }
+
     void Delete(void *value) {
         auto r_it = reverse_mapping_.find(value);
         if (r_it == reverse_mapping_.end()) {
@@ -200,7 +210,7 @@ struct Foo {
 };
 
 struct Bar {
-    char data[256];
+    char data[64];
 };
 
 #include <iostream>
@@ -210,6 +220,14 @@ void inspect() {
         execl("/usr/bin/tree", "/usr/bin/tree", "/dev/shm", NULL);
     }
     wait(nullptr);
+}
+
+void dump(std::pair<void *, size_t> mem) {
+    if (mem.first && mem.second) {
+        std::cout << std::string((char *)mem.first, mem.second) << std::endl;
+    } else {
+        std::cout << "(nil)" << std::endl;
+    }
 }
 
 int main() {
@@ -232,6 +250,9 @@ int main() {
         pmap.Delete(foo);
 
         inspect();
+
+        dump(pmap.GetNewest(0));
+        dump(pmap.GetNewest(1));
 
 //    pmap.Delete(bar);
 
