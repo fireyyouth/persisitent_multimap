@@ -48,23 +48,76 @@ struct PersistentMultiMap {
     std::map<void *, decltype(mapping_)::iterator> reverse_mapping_;
 
 
-    static uint64_t GetMaxVersion(DIR *dfd) {
-        uint64_t max_value = 0; // 0 means none
-        struct dirent *dp = NULL;
-        while ((dp = readdir(dfd)) != NULL) {
-            uint64_t value = strtoull(dp->d_name, NULL, 10);
-            if (value > max_value) {
-                max_value = value;
-            }
+    uint64_t GetMaxVersion(uint64_t id) {
+        auto end = mapping_.upper_bound(std::make_pair(id, 0UL - 1UL));
+        if (end == mapping_.begin()) {
+            return 0;
         }
-        return max_value;
+        if (std::prev(end, 1)->first.first != id) {
+            return 0;
+        }
+        return std::prev(end, 1)->first.second;
     }
 
-    PersistentMultiMap()=default;
+
     PersistentMultiMap(const PersistentMultiMap &)=delete;
     PersistentMultiMap(PersistentMultiMap &&)=delete;
     PersistentMultiMap & operator=(const PersistentMultiMap &)=delete;
     PersistentMultiMap & operator=(PersistentMultiMap &&)=delete;
+
+    static bool ParseUInt(const char *s, uint64_t *out) {
+        char *end = nullptr;
+        auto id = strtoul(s, &end, 10);
+        if (!end || *end != '\0') {
+            return false;
+        }
+        *out = id;
+        return true;
+    }
+
+    PersistentMultiMap() {
+        DirDiscriptor root_dir(opendir("/dev/shm"));
+        if (!root_dir.Get()) {
+            throw 0;
+        }
+        int root_dir_fd = dirfd(root_dir.Get()); // owned by root_dir
+        while (auto dp = readdir(root_dir.Get())) {
+            uint64_t id;
+            if (!ParseUInt(dp->d_name, &id)) {
+                continue;
+            }
+
+            int sub_dir_fd = openat(root_dir_fd, dp->d_name, O_RDONLY | O_DIRECTORY);
+            if (sub_dir_fd < 0) {
+                throw std::runtime_error(strerror(errno));
+            }
+            DirDiscriptor sub_dir(fdopendir(sub_dir_fd)); // take ownership of sub_dir_fd
+            if (!sub_dir.Get()) {
+                throw 0;
+            }
+            while (auto dp = readdir(sub_dir.Get())) {
+                uint64_t version;
+                if (!ParseUInt(dp->d_name, &version)) {
+                    continue;
+                }
+ 
+                FileDiscriptor shm_fd(openat(sub_dir_fd, dp->d_name, O_RDWR));
+                if (shm_fd.Get() < 0) {
+                    throw 0;
+                }
+                struct stat statbuf;
+                fstat(shm_fd.Get(), &statbuf);
+
+                void *addr = mmap(NULL, statbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd.Get(), 0);
+                if (!addr) {
+                    throw 0;
+                }
+                auto [iter, inserted] = mapping_.emplace(std::make_pair(id, version), std::make_pair(addr, statbuf.st_size));
+                reverse_mapping_.emplace(addr, iter);
+            }
+        }
+    }
+
 
     void *Create(uint64_t id, size_t size) {
         char dir_path[300];
@@ -76,11 +129,7 @@ struct PersistentMultiMap {
 
         uint64_t version = 0;
         {
-            DirDiscriptor dfd(opendir(dir_path));
-            if (!dfd.Get()) {
-                throw 0;
-            }
-            version = GetMaxVersion(dfd.Get());
+            version = GetMaxVersion(id);
             if (version + 1 == 0) {
                 throw 0;
             }
@@ -164,28 +213,31 @@ void inspect() {
 }
 
 int main() {
-    auto & pmap = PersistentMultiMap::GetInstance();
-    std::string dumy;
+    try {
+        auto & pmap = PersistentMultiMap::GetInstance();
+        std::string dumy;
 
-    inspect();
+        inspect();
 
-    auto foo = (Foo *)pmap.Create(1, sizeof(Foo));
-    memset(foo->data, 'f', sizeof(foo->data));
+        auto foo = (Foo *)pmap.Create(1, sizeof(Foo));
+        memset(foo->data, 'f', sizeof(foo->data));
 
-    inspect();
-    
+        inspect();
 
-    auto bar = (Bar *)pmap.Create(1, sizeof(Bar));
-    memset(bar->data, 'b', sizeof(bar->data));
+        auto bar = (Bar *)pmap.Create(1, sizeof(Bar));
+        memset(bar->data, 'b', sizeof(bar->data));
 
-    inspect();
+        inspect();
 
-    pmap.Delete(foo);
+        pmap.Delete(foo);
 
-    inspect();
+        inspect();
 
-    pmap.Delete(bar);
+//    pmap.Delete(bar);
 
-    inspect();
+ //   inspect();
+    } catch (const std::exception & exp) {
+        std::cerr << exp.what() << std::endl;
+    }
 }
 
